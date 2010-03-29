@@ -2,6 +2,9 @@
 require 'etc'
 require 'logger'
 require 'fileutils'
+require 'rubygems'
+require 'sequel'
+require 'parseconfig'
 require 'getoptlong.rb'
 require 'cached_file.rb'
 
@@ -13,8 +16,9 @@ end
 
 def show_version
   puts <<-EOF
-RVlogger 0.9 (apache/lighttpd logfile parser)
+RVlogger 1.0 (apache/lighttpd logfile parser)
 written by Josh Goebel <dreamer3@gmail.com>
+and Fabian Becker <halfdan@xnorfz.de>
 based on vlogger by Steve J. Kondik <shade@chemlab.org>
 
 This is free software; see the source for copying conditions.  There is NO
@@ -38,6 +42,9 @@ host components, and rotates the files daily.
                         (default: %Y%m%d-access.log)
   -s SYMLINK            maintain symlink to most recent log file
                         (default: access.log)
+  -d CONFIG             use sequel usage tracker
+  -x                    ignore www subdomain
+  -w SUBDIR             write to SUBDIR in vhost directory
 
   -h                    display this help
   -v                    output version information
@@ -45,7 +52,7 @@ host components, and rotates the files daily.
 When running with -a, performance may improve, but this might confuse some 
 log analysis software that expects complete log entries at all times.  
 
-Report bugs and patches to <dreamer3@gmail.com>.
+Report bugs and patches to <halfdan@xnorfz.de>.
   EOF
   exit
 #   When running with
@@ -90,6 +97,8 @@ class RVLogger
     attr_accessor :symlink
     attr_accessor :symlink_file
     attr_accessor :vhosts
+    attr_accessor :subdir
+    attr_accessor :ignorewww
   end
 
   @rotate=true
@@ -97,6 +106,8 @@ class RVLogger
   @symlink=false
   @symlink_file="access.log"
   @vhosts={}
+  @subdir=""
+  @ignorewww=false
 
   def self.rotate!(vhost)
     filename=RVLogger.log_filename(vhost.hostname)
@@ -116,8 +127,8 @@ class RVLogger
   
   def self.log_filename(vhost)
 #   return "/var/log/lighttpd/access_log" if vhost.empty?
-    return File.join(@basedir, vhost, "l", @template) unless @rotate
-    File.join(@basedir, vhost, "l", Time.now.strftime(@template))
+    return File.join(@basedir, vhost, @template) unless @rotate
+    File.join(@basedir, vhost, Time.now.strftime(@template))
   end
   
 end
@@ -133,6 +144,8 @@ parser.set_options(
   ["--norotate","-n", GetoptLong::NO_ARGUMENT],
   ["--size","-r", GetoptLong::REQUIRED_ARGUMENT],
   ["--template","-t", GetoptLong::REQUIRED_ARGUMENT],
+  ["--ignorewww","-x", GetoptLong::NO_ARGUMENT],
+  ["--subdir","-w", GetoptLong::REQUIRED_ARGUMENT],
   ["--help","-h", GetoptLong::NO_ARGUMENT],
   ["--version","-v", GetoptLong::NO_ARGUMENT]
 )
@@ -173,6 +186,10 @@ parser.each_option do |name, arg|
     CachedFile.max_file_handles=arg.to_i
   when :noflush
     CachedFile.flush=false
+  when :subdir
+    RVLogger.subdir=arg unless arg.empty?
+  when :ignorewww
+    RVLogger.ignorewww=true
   end
 end
 
