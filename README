@@ -1,4 +1,23 @@
-rvlogger is my re-implimentation of vlogger in Ruby
+rvlogger is a re-implimentation of vlogger in Ruby
+
+This is a fork of the original RVlogger from Josh Goebel.
+His implementation was not complete when compared to the
+original vlogger. 
+
+Features in this implementation:
+- Database logging (e.g. for per-vhost billing)
+- chroot
+- Disabling directory creation / logging to a default 
+  host if vhost does not exist.
+
+Required gems's:
+parseconfig
+sequel
+
+
+
+-- Original README --
+rvlogger is a re-implimentation of vlogger in Ruby
 
 I was tired of vlogger crashing when directories didn't exist
 and I really wasn't in the mood to learn Perl so I just
