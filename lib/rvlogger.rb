@@ -35,6 +35,7 @@ host components, and rotates the files daily.
 
   -a                    do not autoflush files (default: flush)
   -n                    don't rotate files (default: rotate)
+  -k                    known vhosts only
   -f MAXFILES           max number of files to keep open (default: 100)
   -u UID                uid to switch to when running as root
   -g GID                gid to switch to when running as root
@@ -44,7 +45,7 @@ host components, and rotates the files daily.
                         (default: access.log)
   -d CONFIG             use sequel usage tracker
   -x                    ignore www subdomain
-  -w SUBDIR             write to SUBDIR in vhost directory
+  -w SUBDIR             write to SUBDIR in vhost directory                        
 
   -h                    display this help
   -v                    output version information
@@ -55,9 +56,9 @@ log analysis software that expects complete log entries at all times.
 Report bugs and patches to <halfdan@xnorfz.de>.
   EOF
   exit
-#   When running with
-#  -r, the template becomes %Y%m%d-%T-xxx.log.  SIZE is given in bytes.
-#     -r SIZE                     rotate when file reaches SIZE
+  #   When running with
+  #  -r, the template becomes %Y%m%d-%T-xxx.log.  SIZE is given in bytes.
+  #     -r SIZE                     rotate when file reaches SIZE
 end 
 
 class VHost
@@ -69,9 +70,10 @@ class VHost
     self.hostname=hostname
     begin
       self.file=CachedFile.open filename, "a"
+      update_symlink(filename) if RVLogger.symlink
     rescue
       unless File.exists? File.dirname(filename)
-        FileUtils.mkdir File.dirname(filename)
+        FileUtils.mkdir_p File.dirname(filename)
       end
       self.file=CachedFile.open filename, "a"
     end
@@ -79,6 +81,11 @@ class VHost
   
   def needs_rotation?
     file.path!=RVLogger.log_filename(hostname)
+  end
+
+  def update_symlink filename
+    puts "Symlink: " + File.basename(filename) + " " + File.join(File.dirname(filename), CachedFile.symlink_file)
+    FileUtils.ln_sf File.basename(filename), File.join(File.dirname(filename), CachedFile.symlink_file)
   end
   
   def write(entry)
@@ -99,6 +106,7 @@ class RVLogger
     attr_accessor :vhosts
     attr_accessor :subdir
     attr_accessor :ignorewww
+    attr_accessor :knownonly
   end
 
   @rotate=true
@@ -108,27 +116,25 @@ class RVLogger
   @vhosts={}
   @subdir=""
   @ignorewww=false
+  @knownonly=false
 
   def self.rotate!(vhost)
     filename=RVLogger.log_filename(vhost.hostname)
     vhost.file.close 
     vhost.file=CachedFile.open(filename,"a")
-    if (RVLogger.symlink)
-      FileUtils.ln_sf File.basename(filename), File.join(File.dirname(filename), CachedFile.symlink_file)
-    end
+    vhost.update_symlink(filename) if RVLogger.symlink
   end
 
   def self.find(hostname)
     return @vhosts[hostname] if @vhosts[hostname]
-  #    puts "creating new vhost for #{hostname}"
+    # puts "creating new vhost for #{hostname}"
     @vhosts[hostname]=VHost.new(hostname, log_filename(hostname))
   end
 
   
   def self.log_filename(vhost)
-#   return "/var/log/lighttpd/access_log" if vhost.empty?
-    return File.join(@basedir, vhost, @template) unless @rotate
-    File.join(@basedir, vhost, Time.now.strftime(@template))
+    return File.join(@basedir, vhost, @subdir, @template) unless @rotate
+    File.join(@basedir, vhost, @subdir, Time.now.strftime(@template))
   end
   
 end
@@ -139,6 +145,7 @@ parser.set_options(
   ["--user","-u", GetoptLong::REQUIRED_ARGUMENT],
   ["--group","-g", GetoptLong::REQUIRED_ARGUMENT],
   ["--maxfiles","-f", GetoptLong::REQUIRED_ARGUMENT],
+  ["--knownonly", "-k", GetoptLong::NO_ARGUMENT],
   ["--symlink","-s", GetoptLong::OPTIONAL_ARGUMENT],
   ["--noflush","-a", GetoptLong::NO_ARGUMENT],
   ["--norotate","-n", GetoptLong::NO_ARGUMENT],
@@ -171,6 +178,8 @@ parser.each_option do |name, arg|
     rescue Errno::EPERM
       puts "No permission to become group #{arg}."; exit
     end
+  when :knownonly
+    RVLogger.knownonly=true
   when :template
     Time.now.strftime(arg) # catch any errors early
     RVLogger.template=arg
@@ -187,7 +196,7 @@ parser.each_option do |name, arg|
   when :noflush
     CachedFile.flush=false
   when :subdir
-    RVLogger.subdir=arg unless arg.empty?
+    RVLogger.subdir=arg
   when :ignorewww
     RVLogger.ignorewww=true
   end
@@ -204,30 +213,38 @@ end
 
 #while line = STDIN.gets do
 STDIN.each_line do |line|
-    # Get the first token from the log record; it's the identity 
-    # of the virtual host to which the record applies.
-    vhost=line.split(/\s/).first
-    next if vhost.nil?
+  # Get the first token from the log record; it's the identity
+  # of the virtual host to which the record applies.
+  vhost=line.split(/\s/).first
+  next if vhost.nil?
 
-    # Normalize the virtual host name to all lowercase.
-    vhost.downcase!
+  # Normalize the virtual host name to all lowercase.
+  vhost.downcase!
     
-    # if the vhost contains a "/" or "\", it is illegal 
-    vhost="default" if vhost =~ /\/|\\/
+  # if the vhost contains a "/" or "\", it is illegal
+  vhost="default" if vhost =~ /\/|\\/
 
-    # DO YOUR OWN PROCESSING HERE
-    vhost.gsub!(/^www\./,"")    # no www
-    vhost.gsub!(/:\d+$/,"")     # no ports
+  # Remove www. from hostname if -x was given.
+  vhost.gsub!(/^www\./,"") if RVLogger.ignorewww
 
-    # Strip off the first token (which may be null in the
-    # case of the default server)
-    line.gsub!(/^\S*\s+/,"")
+  # Remove port from vhost name
+  vhost.gsub!(/:\d+$/,"")     # no ports
 
-    begin
-      RVLogger.find(vhost).write line
-#    rescue
-#      puts "Couldn't write to log: #{RVLogger.log_filename(vhost)}"
-    end
+  # Allow only known vhosts
+  if RVLogger.knownonly
+    path = File.join(RVLogger.basedir, vhost)
+    vhost="default" unless File.exist? path
+  end
+
+  # Strip off the first token (which may be null in the
+  # case of the default server)
+  line.gsub!(/^\S*\s+/,"")
+
+  begin
+    RVLogger.find(vhost).write line
+    #    rescue
+    #      puts "Couldn't write to log: #{RVLogger.log_filename(vhost)}"
+  end
 end
 
 CachedFile.close_all
