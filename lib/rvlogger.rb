@@ -69,14 +69,14 @@ class VHost
   def initialize(hostname,filename)
     self.hostname=hostname
     begin
-      self.file=CachedFile.open filename, "a"
-      update_symlink(filename) if RVLogger.symlink
+      self.file=CachedFile.open filename, "a"      
     rescue
       unless File.exists? File.dirname(filename)
         FileUtils.mkdir_p File.dirname(filename)
       end
       self.file=CachedFile.open filename, "a"
     end
+    update_symlink(filename) if RVLogger.symlink
   end
   
   def needs_rotation?
@@ -84,8 +84,11 @@ class VHost
   end
 
   def update_symlink filename
-    puts "Symlink: " + File.basename(filename) + " " + File.join(File.dirname(filename), CachedFile.symlink_file)
-    FileUtils.ln_sf File.basename(filename), File.join(File.dirname(filename), CachedFile.symlink_file)
+    FileUtils.ln_s(
+      File.basename(filename),
+      File.join(File.dirname(filename), RVLogger.symlink_file),
+      :force => true
+    )
   end
   
   def write(entry)
@@ -99,7 +102,6 @@ class RVLogger
 
   class << self
     attr_accessor :template
-    attr_accessor :basedir
     attr_accessor :rotate, :rotate_size
     attr_accessor :symlink
     attr_accessor :symlink_file
@@ -107,6 +109,8 @@ class RVLogger
     attr_accessor :subdir
     attr_accessor :ignorewww
     attr_accessor :knownonly
+    attr_accessor :uid
+    attr_accessor :gid
   end
 
   @rotate=true
@@ -117,6 +121,8 @@ class RVLogger
   @subdir=""
   @ignorewww=false
   @knownonly=false
+  @uid=0
+  @gid=0
 
   def self.rotate!(vhost)
     filename=RVLogger.log_filename(vhost.hostname)
@@ -133,8 +139,8 @@ class RVLogger
 
   
   def self.log_filename(vhost)
-    return File.join(@basedir, vhost, @subdir, @template) unless @rotate
-    File.join(@basedir, vhost, @subdir, Time.now.strftime(@template))
+    return File.join(vhost, @subdir, @template) unless @rotate
+    File.join(vhost, @subdir, Time.now.strftime(@template))
   end
   
 end
@@ -165,19 +171,9 @@ parser.each_option do |name, arg|
   when :help
     show_help
   when :user
-    uid=Etc.getpwnam(arg).uid rescue (puts "User #{arg} not found."; exit) 
-    begin
-      Process.uid=uid 
-    rescue Errno::EPERM 
-      puts("No permission to become #{arg}."); exit
-    end
+    RVLogger.uid=Etc.getpwnam(arg).uid rescue (puts "User #{arg} not found."; exit)
   when :group
-    gid=Etc.getgrnam(arg).gid rescue (puts "Group #{arg} not found."; exit) 
-    begin
-      Process.gid=gid 
-    rescue Errno::EPERM
-      puts "No permission to become group #{arg}."; exit
-    end
+    RVLogger.gid=Etc.getgrnam(arg).gid rescue (puts "Group #{arg} not found."; exit)
   when :knownonly
     RVLogger.knownonly=true
   when :template
@@ -204,11 +200,31 @@ end
 
 # show help if we're not passed a path
 show_help if ARGV[0].nil?
-# set basedir if we were passed a path
+# chroot to log dir if we were passed a path
 if (File.exists? ARGV[0])
-  RVLogger.basedir=ARGV[0]
+  begin
+    Dir.chdir(ARGV[0])
+    Dir.chroot('.')
+  rescue
+    puts $!
+    exit 1
+  end
 else
   puts "Log path does not exist: #{ARGV[0]}."; exit
+end
+
+# Change gid if requested
+if RVLogger.gid > 0
+  unless Process::GID.change_privilege(RVLogger.gid) == RVLogger.gid
+      puts "No permission to become group #{RVLogger.gid}."; exit
+  end
+end
+
+# Change uid if requested
+if RVLogger.uid > 0
+  unless Process::UID.change_privilege(RVLogger.uid) == RVLogger.uid
+      puts("No permission to become #{RVLogger.uid}."); exit
+  end
 end
 
 #while line = STDIN.gets do
@@ -231,9 +247,8 @@ STDIN.each_line do |line|
   vhost.gsub!(/:\d+$/,"")     # no ports
 
   # Allow only known vhosts
-  if RVLogger.knownonly
-    path = File.join(RVLogger.basedir, vhost)
-    vhost="default" unless File.exist? path
+  if RVLogger.knownonly    
+    vhost="default" unless File.exist? vhost
   end
 
   # Strip off the first token (which may be null in the
