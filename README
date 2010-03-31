@@ -1,4 +1,4 @@
-rvlogger is a re-implimentation of vlogger in Ruby
+rvlogger is a re-implementation of vlogger in Ruby
 
 This is a fork of the original RVlogger from Josh Goebel.
 His implementation was not complete when compared to the
@@ -9,6 +9,7 @@ Features in this implementation:
 - chroot
 - Disabling directory creation / logging to a default 
   host if vhost does not exist.
+- ErrorLog logging.
 
 Required gems's:
 parseconfig
