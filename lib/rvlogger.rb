@@ -1,4 +1,4 @@
-#!/usr/bin/env ruby
+#!/usr/local/bin/ruby
 require 'etc'
 require 'logger'
 require 'fileutils'
@@ -6,7 +6,7 @@ require 'rubygems'
 require 'sequel'
 require 'parseconfig'
 require 'getoptlong.rb'
-require 'cached_file.rb'
+require File.expand_path("../cached_file.rb", __FILE__)
 
 # trap HUP and close all open files
 Signal.trap("HUP") do
@@ -34,18 +34,21 @@ Handles a piped logfile from a web server, splitting it into it's
 host components, and rotates the files daily.
 
   -a                    do not autoflush files (default: flush)
+  -e                    errorlog mode
   -n                    don't rotate files (default: rotate)
-  -k                    known vhosts only
+  -k                    known vhosts only (default: false)
   -f MAXFILES           max number of files to keep open (default: 100)
   -u UID                uid to switch to when running as root
   -g GID                gid to switch to when running as root
   -t TEMPLATE           filename template (as understood by strftime)
                         (default: %Y%m%d-access.log)
   -s SYMLINK            maintain symlink to most recent log file
-                        (default: access.log)
-  -d CONFIG             use sequel usage tracker
-  -x                    ignore www subdomain
-  -w SUBDIR             write to SUBDIR in vhost directory                        
+                        (default: current.log)
+  -c CONFIG             use CONFIG file
+  -d                    use database recording (default: false)
+  -x                    ignore www subdomain (default: false)
+  -w SUBDIR             write to SUBDIR in vhost directory
+                        (default: empty)
 
   -h                    display this help
   -v                    output version information
@@ -65,15 +68,23 @@ class VHost
 
   attr_accessor :hostname
   attr_accessor :file
+  attr_accessor :changed
+  attr_accessor :config
   
-  def initialize(hostname,filename)
+  def initialize(hostname,filename,config)
+    # Initially there is no change
+    self.changed=false
     self.hostname=hostname
+    self.config=config
+
     begin
       self.file=CachedFile.open filename, "a"      
     rescue
+      # Create directory if neccessary
       unless File.exists? File.dirname(filename)
         FileUtils.mkdir_p File.dirname(filename)
       end
+      # Open file
       self.file=CachedFile.open filename, "a"
     end
     update_symlink(filename) if RVLogger.symlink
@@ -92,110 +103,165 @@ class VHost
   end
   
   def write(entry)
+    # Rotate if neccessary
     RVLogger.rotate!(self) if needs_rotation?
+    # Write entry
     file.write entry
+    # A change has occured
+    self.changed=true
   end
 
 end
 
 class RVLogger
 
-  class << self
-    attr_accessor :template
-    attr_accessor :rotate, :rotate_size
-    attr_accessor :symlink
-    attr_accessor :symlink_file
-    attr_accessor :vhosts
-    attr_accessor :subdir
-    attr_accessor :ignorewww
-    attr_accessor :knownonly
-    attr_accessor :uid
-    attr_accessor :gid
+  def initialize(config, database=nil)
+    @config=config
+    @database=database unless database.nil?
+    @vhosts={}
   end
 
-  @rotate=true
-  @template="%Y%m%d-access.log"
-  @symlink=false
-  @symlink_file="access.log"
-  @vhosts={}
-  @subdir=""
-  @ignorewww=false
-  @knownonly=false
-  @uid=0
-  @gid=0
-
-  def self.rotate!(vhost)
-    filename=RVLogger.log_filename(vhost.hostname)
+  def rotate!(vhost)
+    filename=log_filename(vhost.hostname)
     vhost.file.close 
     vhost.file=CachedFile.open(filename,"a")
-    vhost.update_symlink(filename) if RVLogger.symlink
+    vhost.update_symlink(filename) if config.params['general']['symlink']
   end
 
-  def self.find(hostname)
+  def find(hostname)
     return @vhosts[hostname] if @vhosts[hostname]
-    # puts "creating new vhost for #{hostname}"
+
     @vhosts[hostname]=VHost.new(hostname, log_filename(hostname))
   end
-
   
-  def self.log_filename(vhost)
-    return File.join(vhost, @subdir, @template) unless @rotate
-    File.join(vhost, @subdir, Time.now.strftime(@template))
+  def log_filename(vhost)
+    # Only parse template if rotation is true
+    return File.join(
+      vhost,
+      config.params['general']['subdir'],
+      config.params['general']['template']
+    ) unless config.params['general']['rotate']
+
+    File.join(
+      vhost,
+      config.params['general']['subdir'],
+      Time.now.strftime(config.params['general']['template'])
+    )
+  end
+
+  def update_db
+    vhosts.each { |vhost|
+      if vhost.changed
+        # Update DB
+        vhost.changed=false
+      end
+    }
   end
   
 end
+
+# Instantiate ParseConfig
+config = ParseConfig.new
+
+# Set default config
+config.add("general", {
+    :rotate => true,
+    :known_hosts_only => false,
+    :max_files => 100,
+    :uid => 0,
+    :gid => 0,
+    :template => '%Y%m%d-access.log',
+    :symlink => true,
+    :symlink_name => 'current.log',
+    :use_db => false,
+    :ignore_www => false,
+    :subdir => ''
+  }
+)
+
+# As default we use sqlite
+config.add("database", {
+    :adapter => sqlite,
+    :host => '',
+    :user => '',
+    :password => '',
+    :name => 'rvlogger.db',
+    :dump => 30
+  }
+)
+
 
 # handle arguments
 parser = GetoptLong.new
 parser.set_options(
   ["--user","-u", GetoptLong::REQUIRED_ARGUMENT],
   ["--group","-g", GetoptLong::REQUIRED_ARGUMENT],
-  ["--maxfiles","-f", GetoptLong::REQUIRED_ARGUMENT],
-  ["--knownonly", "-k", GetoptLong::NO_ARGUMENT],
+  ["--max-files","-f", GetoptLong::REQUIRED_ARGUMENT],
+  ["--known-hosts-only", "-k", GetoptLong::NO_ARGUMENT],
   ["--symlink","-s", GetoptLong::OPTIONAL_ARGUMENT],
-  ["--noflush","-a", GetoptLong::NO_ARGUMENT],
-  ["--norotate","-n", GetoptLong::NO_ARGUMENT],
+  ["--no-flush","-a", GetoptLong::NO_ARGUMENT],
+  ["--no-rotate","-n", GetoptLong::NO_ARGUMENT],
   ["--size","-r", GetoptLong::REQUIRED_ARGUMENT],
   ["--template","-t", GetoptLong::REQUIRED_ARGUMENT],
-  ["--ignorewww","-x", GetoptLong::NO_ARGUMENT],
+  ["--ignore-www","-x", GetoptLong::NO_ARGUMENT],
   ["--subdir","-w", GetoptLong::REQUIRED_ARGUMENT],
   ["--help","-h", GetoptLong::NO_ARGUMENT],
+  ["--config", "-c", GetoptLong::REQUIRED_ARGUMENT],
+  ["--use-db", "-d", GetoptLong::NO_ARGUMENT],
   ["--version","-v", GetoptLong::NO_ARGUMENT]
 )
 
 parser.each_option do |name, arg|
-  opt=name.gsub(/^--/,"").to_sym
+  opt=name.gsub(/^--/,"").gsub(/-/,'_').to_sym
   case opt
   when :version
     show_version
   when :help
     show_help
   when :user
-    RVLogger.uid=Etc.getpwnam(arg).uid rescue (puts "User #{arg} not found."; exit)
+    uid = Etc.getpwnam(arg).uid rescue (puts "User #{arg} not found."; exit)
+    config.add_to_group("general", "uid", uid)
   when :group
-    RVLogger.gid=Etc.getgrnam(arg).gid rescue (puts "Group #{arg} not found."; exit)
-  when :knownonly
-    RVLogger.knownonly=true
+    gid = Etc.getgrnam(arg).gid rescue (puts "Group #{arg} not found."; exit)
+    config.add_to_group("general", "gid", gid)
+  when :known_hosts_only
+    config.add_to_group("general", "known_hosts_only", true)
   when :template
     Time.now.strftime(arg) # catch any errors early
-    RVLogger.template=arg
-  when :norotate
-    RVLogger.rotate=false
-    RVLogger.template="access.log"
+    config.add_to_group("general", "template", arg)
+  when :no_rotate
+    config.add_to_group("general", "template", "access.log")
+    config.add_to_group("general", "rotate", false)
   when :symlink
-    RVLogger.symlink=true
-    RVLogger.symlink_file=arg unless arg.empty?
+    config.add_to_group("general", "symlink", true)
+    if arg.empty?
+      config.add_to_group("general", "symlink_file", "current.log")
+    else
+      config.add_to_group("general", "symlink_file", arg)
+    end
   when :size
-    RVLogger.rotate_size=arg.to_i
-  when :maxfiles
+    config.add_to_group('general', 'rotate_size', arg.to_i)
+  when :max_files
+    #config.add_to_group('general', 'max_file_handles', arg.to_i)
     CachedFile.max_file_handles=arg.to_i
-  when :noflush
+  when :no_flush
     CachedFile.flush=false
   when :subdir
-    RVLogger.subdir=arg
-  when :ignorewww
-    RVLogger.ignorewww=true
+    config.add_to_group('general', 'subdir', arg)
+  when :ignore_www
+    config.add_to_group('general', 'ignore_www', true)
+  when :config
+    if File.exists? arg
+      config.config_file=arg
+    end
+  when :use_db
+    config.add_to_group('general', 'use_db', true)
   end
+end
+
+# Import config if set
+if config.config_file
+  config.import_config
 end
 
 # show help if we're not passed a path
@@ -214,20 +280,47 @@ else
 end
 
 # Change gid if requested
-if RVLogger.gid > 0
-  unless Process::GID.change_privilege(RVLogger.gid) == RVLogger.gid
-      puts "No permission to become group #{RVLogger.gid}."; exit
+gid = config.params['general']['gid']
+
+if gid > 0
+  unless Process::GID.change_privilege(gid) == gid
+    puts "No permission to become group #{gid}."; exit
   end
 end
 
 # Change uid if requested
-if RVLogger.uid > 0
-  unless Process::UID.change_privilege(RVLogger.uid) == RVLogger.uid
-      puts("No permission to become #{RVLogger.uid}."); exit
+uid = config.params['general']['uid']
+
+if uid > 0
+  unless Process::UID.change_privilege(uid) == uid
+    puts("No permission to become #{uid}."); exit
   end
 end
 
-#while line = STDIN.gets do
+# Connect to db if use_db => true
+begin
+  DB = Sequel.connect(
+    :adapter => config.params['database']['adapter'],
+    :host => config.params['database']['host'],
+    :user => config.params['database']['user'],
+    :password => config.params['database']['pass'],
+    :database => config.params['database']['name']
+  ) if config.params['general']['use_db']
+rescue
+  puts "Could not connect to database!"
+  exit;
+end
+
+# Instantiate RVLogger
+if config.params['general']['use_db']
+  rvlogger = RVLogger.new(config, DB)
+else
+  rvlogger = RVLogger.new(config)
+end
+
+time = Time.now
+
+# Begin main loop
 STDIN.each_line do |line|
   # Get the first token from the log record; it's the identity
   # of the virtual host to which the record applies.
@@ -241,13 +334,13 @@ STDIN.each_line do |line|
   vhost="default" if vhost =~ /\/|\\/
 
   # Remove www. from hostname if -x was given.
-  vhost.gsub!(/^www\./,"") if RVLogger.ignorewww
+  vhost.gsub!(/^www\./,"") if rvlogger.config.params['general']['ignore_www']
 
   # Remove port from vhost name
   vhost.gsub!(/:\d+$/,"")     # no ports
 
   # Allow only known vhosts
-  if RVLogger.knownonly    
+  if rvlogger.config.params['general']['known_hosts_only']
     vhost="default" unless File.exist? vhost
   end
 
@@ -256,9 +349,14 @@ STDIN.each_line do |line|
   line.gsub!(/^\S*\s+/,"")
 
   begin
-    RVLogger.find(vhost).write line
+    rvlogger.find(vhost).write line
     #    rescue
     #      puts "Couldn't write to log: #{RVLogger.log_filename(vhost)}"
+  end
+
+  # Is it time to update the database?
+  if Time.now > time + config.params['database']['dump']
+    rvlogger.update_db
   end
 end
 
