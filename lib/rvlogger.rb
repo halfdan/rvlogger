@@ -7,6 +7,7 @@ require 'sequel'
 require 'parseconfig'
 require 'apachelogregex'
 require 'getoptlong.rb'
+require 'yaml'
 require File.expand_path("../cached_file.rb", __FILE__)
 
 # trap HUP and close all open files
@@ -66,35 +67,36 @@ Report bugs and patches to <halfdan@xnorfz.de>.
 end 
 
 class VHost
-
+ 
   attr_accessor :hostname
   attr_accessor :file
   attr_accessor :changed
   attr_accessor :config
-  attr_accessor :id
-  
+  attr_accessor :id 
+  @changed=false
+ 
   def initialize(config,hostname,id=0)
     # Initially there is no change
-    self.changed=false
-    self.hostname=hostname
-    self.config=config
-    self.id=id
+    @changed=false
+    @hostname=hostname
+    @config=config
+    @id=id
     @traffic=0
 
     filename = log_filename(hostname)
     begin
-      self.file=CachedFile.open filename, "a"      
+      @file=CachedFile.open filename, "a"      
     rescue
       # Create directory if neccessary
       unless File.exists? File.dirname(filename)
         FileUtils.mkdir_p File.dirname(filename)
       end
       # Open file
-      self.file=CachedFile.open filename, "a"
+      @file=CachedFile.open filename, "a"
     end
     update_symlink(filename) if config.params['general']['symlink']
   end 
-  
+
   def write(line)
     # Rotate if neccessary
     rotate! if needs_rotation?
@@ -106,19 +108,20 @@ class VHost
     if config.params['general']['use_db']
       parser = ApacheLogRegex.new(config.params['general']['logfile_format'])
       res = parser.parse(line)
-      @traffic += res["%O"]
+      @traffic += 1024
     end
   end
   
   def update_db dbconnection
     traffic = dbconnection[:traffic]
-    today = traffic.filter(:vhost_id => self.id, :date => Date.today.to_s)
+    today = traffic.filter(:vhosts_id => @id, :date => Date.today.to_s)
     if today.count > 0
-      bytes = today[:bytes]
-      today.update(:bytes => bytes + @traffic)
+      bytes = today.first[:bytes]
+      bytes = bytes.to_i + @traffic
+      today.update(:bytes => bytes)
     else
       traffic.insert(
-        :vhost_id => id,
+        :vhosts_id => @id,
         :date => Date.today.to_s,
         :bytes => @traffic
       )
@@ -143,12 +146,14 @@ class VHost
   def log_filename(hostname)
     # Only parse template if rotation is true
     return File.join(
+      config.params['general']['logpath'],
       hostname,
       config.params['general']['subdir'],
       config.params['general']['template']
     ) unless config.params['general']['rotate']
 
     File.join(
+      config.params['general']['logpath'],
       hostname,
       config.params['general']['subdir'],
       Time.now.strftime(config.params['general']['template'])
@@ -176,7 +181,7 @@ class RVLogger
     return @vhosts[hostname] if @vhosts[hostname]
 
     # Add vhost to DB if active
-    if config.params['general']['use_db']
+    if @config.params['general']['use_db']
       domains = @dbconn[:vhosts].filter(:name => hostname)
       unless domains.count > 0
         domains.insert(:name => hostname)
@@ -190,7 +195,7 @@ class RVLogger
   end
 
   def update_db
-    vhosts.each do |vhost|
+    @vhosts.each do |hostname,vhost|
       if vhost.changed
         # Update DB
         vhost.update_db @dbconn
@@ -222,7 +227,7 @@ config.add("general", {
 
 # As default we use sqlite
 config.add("database", {
-    :adapter => sqlite,
+    :adapter => 'sqlite',
     :host => '',
     :user => '',
     :password => '',
@@ -310,8 +315,9 @@ show_help if ARGV[0].nil?
 # chroot to log dir if we were passed a path
 if (File.exists? ARGV[0])
   begin
-    Dir.chdir(ARGV[0])
-    Dir.chroot('.')
+    config.add_to_group('general', 'logpath', ARGV[0])
+#    Dir.chdir(ARGV[0])
+#    Dir.chroot('.')
   rescue
     puts $!
     exit 1
@@ -323,7 +329,7 @@ end
 # Change gid if requested
 gid = config.params['general']['gid']
 
-if gid > 0
+if gid.to_i > 0
   unless Process::GID.change_privilege(gid) == gid
     puts "No permission to become group #{gid}."; exit
   end
@@ -332,7 +338,7 @@ end
 # Change uid if requested
 uid = config.params['general']['uid']
 
-if uid > 0
+if uid.to_i > 0
   unless Process::UID.change_privilege(uid) == uid
     puts("No permission to become #{uid}."); exit
   end
@@ -349,6 +355,7 @@ begin
   ) if config.params['general']['use_db']
 rescue
   puts "Could not connect to database!"
+  puts $!
   exit;
 end
 
@@ -375,13 +382,13 @@ STDIN.each_line do |line|
   vhost="default" if vhost =~ /\/|\\/
 
   # Remove www. from hostname if -x was given.
-  vhost.gsub!(/^www\./,"") if rvlogger.config.params['general']['ignore_www']
+  vhost.gsub!(/^www\./,"") if config.params['general']['ignore_www'] == "true"
 
   # Remove port from vhost name
   vhost.gsub!(/:\d+$/,"")     # no ports
 
   # Allow only known vhosts
-  if rvlogger.config.params['general']['known_hosts_only']
+  if config.params['general']['known_hosts_only'] == "true"
     vhost="default" unless File.exist? vhost
   end
 
@@ -396,12 +403,13 @@ STDIN.each_line do |line|
   end
 
   # Only continue if we use_db
-  next unless rvlogger.config.params['general']['use_db']
+  next unless config.params['general']['use_db']
 
   # Is it time to update the database?
-  if Time.now > time + config.params['database']['dump']
+  if Time.now > time + config.params['database']['dump'].to_i
     rvlogger.update_db
   end
 end
 
+rvlogger.update_db
 CachedFile.close_all
