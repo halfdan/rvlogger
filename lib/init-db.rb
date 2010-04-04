@@ -27,7 +27,7 @@ DB = Sequel.connect(
 )
 
 puts "- domains"
-DB.create_table :domains do
+DB.create_table :vhosts do
   primary_key :id
   String :name, :unique => true, :null => false
 end
@@ -35,15 +35,15 @@ end
 puts "- traffic"
 DB.create_table :traffic do
   primary_key :id
-  foreign_key :domain_id, :domain
+  foreign_key :vhosts_id, :domain
   BigDecimal :bytes
   Date :date
 end
 
-class Domain < Sequel::Model
+class Vhosts < Sequel::Model
   one_to_many :traffic
 end
 
 class Traffic < Sequel::Model(:traffic)
-  many_to_one :domain
+  many_to_one :vhosts
 end

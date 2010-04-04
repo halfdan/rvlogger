@@ -5,6 +5,7 @@ require 'fileutils'
 require 'rubygems'
 require 'sequel'
 require 'parseconfig'
+require 'apachelogregex'
 require 'getoptlong.rb'
 require File.expand_path("../cached_file.rb", __FILE__)
 
@@ -70,13 +71,17 @@ class VHost
   attr_accessor :file
   attr_accessor :changed
   attr_accessor :config
+  attr_accessor :id
   
-  def initialize(hostname,filename,config)
+  def initialize(config,hostname,id=0)
     # Initially there is no change
     self.changed=false
     self.hostname=hostname
     self.config=config
+    self.id=id
+    @traffic=0
 
+    filename = log_filename(hostname)
     begin
       self.file=CachedFile.open filename, "a"      
     rescue
@@ -87,77 +92,112 @@ class VHost
       # Open file
       self.file=CachedFile.open filename, "a"
     end
-    update_symlink(filename) if RVLogger.symlink
+    update_symlink(filename) if config.params['general']['symlink']
+  end 
+  
+  def write(line)
+    # Rotate if neccessary
+    rotate! if needs_rotation?
+    # Write entry
+    file.write line
+    # A change has occured
+    self.changed=true
+    # Update traffic
+    if config.params['general']['use_db']
+      parser = ApacheLogRegex.new(config.params['general']['logfile_format'])
+      res = parser.parse(line)
+      @traffic += res["%O"]
+    end
   end
   
+  def update_db dbconnection
+    traffic = dbconnection[:traffic]
+    today = traffic.filter(:vhost_id => self.id, :date => Date.today.to_s)
+    if today.count > 0
+      bytes = today[:bytes]
+      today.update(:bytes => bytes + @traffic)
+    else
+      traffic.insert(
+        :vhost_id => id,
+        :date => Date.today.to_s,
+        :bytes => @traffic
+      )
+    end
+    # Reset traffic
+    @traffic=0
+  end
+  
+  private
+
   def needs_rotation?
-    file.path!=RVLogger.log_filename(hostname)
+    file.path!=log_filename(hostname)
+  end
+
+  def rotate!
+    filename=log_filename(hostname)
+    file.close
+    file=CachedFile.open(filename,"a")
+    update_symlink(filename) if config.params['general']['symlink']
+  end
+
+  def log_filename(hostname)
+    # Only parse template if rotation is true
+    return File.join(
+      hostname,
+      config.params['general']['subdir'],
+      config.params['general']['template']
+    ) unless config.params['general']['rotate']
+
+    File.join(
+      hostname,
+      config.params['general']['subdir'],
+      Time.now.strftime(config.params['general']['template'])
+    )
   end
 
   def update_symlink filename
     FileUtils.ln_s(
       File.basename(filename),
-      File.join(File.dirname(filename), RVLogger.symlink_file),
+      File.join(File.dirname(filename), config.params['general']['symlink_file']),
       :force => true
     )
   end
-  
-  def write(entry)
-    # Rotate if neccessary
-    RVLogger.rotate!(self) if needs_rotation?
-    # Write entry
-    file.write entry
-    # A change has occured
-    self.changed=true
-  end
-
 end
 
 class RVLogger
 
   def initialize(config, database=nil)
     @config=config
-    @database=database unless database.nil?
+    @dbconn=database unless database.nil?
     @vhosts={}
-  end
-
-  def rotate!(vhost)
-    filename=log_filename(vhost.hostname)
-    vhost.file.close 
-    vhost.file=CachedFile.open(filename,"a")
-    vhost.update_symlink(filename) if config.params['general']['symlink']
-  end
+  end  
 
   def find(hostname)
     return @vhosts[hostname] if @vhosts[hostname]
 
-    @vhosts[hostname]=VHost.new(hostname, log_filename(hostname))
-  end
-  
-  def log_filename(vhost)
-    # Only parse template if rotation is true
-    return File.join(
-      vhost,
-      config.params['general']['subdir'],
-      config.params['general']['template']
-    ) unless config.params['general']['rotate']
-
-    File.join(
-      vhost,
-      config.params['general']['subdir'],
-      Time.now.strftime(config.params['general']['template'])
-    )
+    # Add vhost to DB if active
+    if config.params['general']['use_db']
+      domains = @dbconn[:vhosts].filter(:name => hostname)
+      unless domains.count > 0
+        domains.insert(:name => hostname)
+      end
+      row = domains[:name=>hostname]
+      id = row[:id]
+      @vhosts[hostname]=VHost.new(@config, hostname, id)
+    else
+      @vhosts[hostname]=VHost.new(@config, hostname)
+    end
   end
 
   def update_db
-    vhosts.each { |vhost|
+    vhosts.each do |vhost|
       if vhost.changed
         # Update DB
+        vhost.update_db @dbconn
         vhost.changed=false
       end
-    }
-  end
-  
+    end
+  end  
 end
 
 # Instantiate ParseConfig
@@ -175,7 +215,8 @@ config.add("general", {
     :symlink_name => 'current.log',
     :use_db => false,
     :ignore_www => false,
-    :subdir => ''
+    :subdir => '',
+    :logfile_format => '%h %l %u %t "%r" %>s %O "%{Referer}i" "%{User-Agent}i"'
   }
 )
 
@@ -353,6 +394,9 @@ STDIN.each_line do |line|
     #    rescue
     #      puts "Couldn't write to log: #{RVLogger.log_filename(vhost)}"
   end
+
+  # Only continue if we use_db
+  next unless rvlogger.config.params['general']['use_db']
 
   # Is it time to update the database?
   if Time.now > time + config.params['database']['dump']
