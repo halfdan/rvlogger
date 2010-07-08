@@ -7,7 +7,6 @@ require 'sequel'
 require 'parseconfig'
 require 'apachelogregex'
 require 'getoptlong.rb'
-require 'yaml'
 require File.expand_path("../cached_file.rb", __FILE__)
 
 # trap HUP and close all open files
@@ -108,7 +107,7 @@ class VHost
     if config.params['general']['use_db']
       parser = ApacheLogRegex.new(config.params['general']['logfile_format'])
       res = parser.parse(line)
-      @traffic += 1024
+      @traffic += res["%O"].to_i unless res.nil?
     end
   end
   
@@ -350,7 +349,7 @@ begin
     :adapter => config.params['database']['adapter'],
     :host => config.params['database']['host'],
     :user => config.params['database']['user'],
-    :password => config.params['database']['pass'],
+    :password => config.params['database']['password'],
     :database => config.params['database']['name']
   ) if config.params['general']['use_db']
 rescue
@@ -389,7 +388,8 @@ STDIN.each_line do |line|
 
   # Allow only known vhosts
   if config.params['general']['known_hosts_only'] == "true"
-    vhost="default" unless File.exist? vhost
+    path=File.join config.params['general']['logpath'], vhost
+    vhost="default" unless File.exist? path
   end
 
   # Strip off the first token (which may be null in the
@@ -408,6 +408,7 @@ STDIN.each_line do |line|
   # Is it time to update the database?
   if Time.now > time + config.params['database']['dump'].to_i
     rvlogger.update_db
+    time = Time.now
   end
 end
 

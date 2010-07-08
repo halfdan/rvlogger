@@ -22,7 +22,7 @@ DB = Sequel.connect(
   :adapter => config.params['database']['adapter'],
   :host => config.params['database']['host'],
   :user => config.params['database']['user'],
-  :password => config.params['database']['pass'],
+  :password => config.params['database']['password'],
   :database => config.params['database']['name']
 )
 
