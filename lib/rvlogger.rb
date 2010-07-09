@@ -132,13 +132,13 @@ class VHost
   private
 
   def needs_rotation?
-    file.path!=log_filename(hostname)
+    @file.path!=log_filename(@hostname)
   end
 
   def rotate!
     filename=log_filename(hostname)
-    file.close
-    file=CachedFile.open(filename,"a")
+    @file.close
+    @file=CachedFile.open(filename,"a")
     update_symlink(filename) if config.params['general']['symlink']
   end
 
